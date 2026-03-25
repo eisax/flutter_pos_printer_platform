@@ -2,11 +2,13 @@ package com.sersoluciones.flutter_pos_printer_platform
 
 import android.Manifest
 import android.app.Activity
+import android.app.PendingIntent
 import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbDevice
+import android.hardware.usb.UsbManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -47,12 +49,12 @@ class FlutterPosPrinterPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallH
     private var isBle: Boolean = false
     private var isScan: Boolean = false
 
-    private lateinit var adapter: USBPrinterService
+    // Lazy initialization ensures adapter is only created when first accessed
+    private val adapter: USBPrinterService by lazy { USBPrinterService.getInstance(usbHandler) }
     private lateinit var bluetoothService: BluetoothService
 
     private val usbHandler = object : Handler(Looper.getMainLooper()) {
         override fun handleMessage(msg: Message) {
-            super.handleMessage(msg)
             when (msg.what) {
                 USBPrinterService.STATE_USB_CONNECTED -> eventUSBSink?.success(2)
                 USBPrinterService.STATE_USB_CONNECTING -> eventUSBSink?.success(1)
@@ -66,7 +68,6 @@ class FlutterPosPrinterPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallH
             get() = BluetoothService.bluetoothConnection?.state ?: 99
 
         override fun handleMessage(msg: Message) {
-            super.handleMessage(msg)
             try {
                 when (msg.what) {
                     BluetoothConstants.MESSAGE_STATE_CHANGE -> {
@@ -112,28 +113,26 @@ class FlutterPosPrinterPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallH
         channel?.setMethodCallHandler(null)
         messageChannel?.setStreamHandler(null)
         messageUSBChannel?.setStreamHandler(null)
-
         if (::bluetoothService.isInitialized) bluetoothService.setHandler(null)
-        if (::adapter.isInitialized) adapter.setHandler(null)
     }
 
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         context = binding.activity.applicationContext
         currentActivity = binding.activity
 
-        // Setup USB
-        adapter = USBPrinterService.getInstance(usbHandler)
+        // USB setup
         try {
-            context?.let { adapter.init(it) }
+            requestUsbPermissions()
+            adapter.init(context!!)
         } catch (e: Exception) {
             Log.e(TAG, "USB init failed: ${e.message}", e)
         }
 
-        // Setup Bluetooth
+        // Bluetooth setup
         bluetoothService = BluetoothService.getInstance(bluetoothHandler)
         bluetoothService.setActivity(currentActivity)
 
-        // EventChannels
+        // EventChannels after activity attached
         messageChannel?.setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) { eventSink = events }
             override fun onCancel(arguments: Any?) { eventSink = null }
@@ -178,6 +177,7 @@ class FlutterPosPrinterPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallH
         }
     }
 
+    // ====== Bluetooth helpers ======
     private fun scanBluetooth(useBle: Boolean, result: MethodChannel.Result) {
         isScan = true
         isBle = useBle
@@ -194,17 +194,12 @@ class FlutterPosPrinterPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallH
         if (verifyBluetoothOn()) {
             bluetoothService.setHandler(bluetoothHandler)
             bluetoothService.onStartConnection(context!!, address!!, result, isBle = isBle, autoConnect = autoConnect)
-        } else {
-            result.success(false)
-        }
+        } else result.success(false)
     }
 
     private fun disconnectBluetooth(result: MethodChannel.Result) {
-        try {
-            bluetoothService.setHandler(bluetoothHandler)
-            bluetoothService.bluetoothDisconnect()
-            result.success(true)
-        } catch (e: Exception) { result.success(false) }
+        try { bluetoothService.setHandler(bluetoothHandler); bluetoothService.bluetoothDisconnect(); result.success(true) }
+        catch (e: Exception) { result.success(false) }
     }
 
     private fun sendBluetoothBytes(call: MethodCall, result: MethodChannel.Result) {
@@ -216,23 +211,25 @@ class FlutterPosPrinterPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallH
     }
 
     private fun sendBluetoothText(call: MethodCall, result: MethodChannel.Result) {
-        val text: String? = call.argument("text")
-        text?.let { bluetoothService.sendData(it) }
+        call.argument<String>("text")?.let { bluetoothService.sendData(it) }
         result.success(true)
     }
 
+    // ====== USB helpers ======
     private fun getUSBDeviceList(result: MethodChannel.Result) {
         val list = ArrayList<HashMap<*, *>>()
         try {
-            adapter.deviceList.forEach { usbDevice ->
-                list.add(hashMapOf(
-                    "name" to usbDevice.deviceName,
-                    "manufacturer" to usbDevice.manufacturerName,
-                    "product" to usbDevice.productName,
-                    "deviceId" to usbDevice.deviceId.toString(),
-                    "vendorId" to usbDevice.vendorId.toString(),
-                    "productId" to usbDevice.productId.toString()
-                ))
+            if (::adapter.isInitialized) {
+                adapter.deviceList.forEach { usbDevice ->
+                    list.add(hashMapOf(
+                        "name" to usbDevice.deviceName,
+                        "manufacturer" to usbDevice.manufacturerName,
+                        "product" to usbDevice.productName,
+                        "deviceId" to usbDevice.deviceId.toString(),
+                        "vendorId" to usbDevice.vendorId.toString(),
+                        "productId" to usbDevice.productId.toString()
+                    ))
+                }
             }
         } catch (e: Exception) { Log.e(TAG, "USB list error: ${e.message}", e) }
         result.success(list)
@@ -242,15 +239,18 @@ class FlutterPosPrinterPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallH
         val vendor = call.argument<Int>("vendor")
         val product = call.argument<Int>("product")
         if (vendor == null || product == null) { result.success(false); return }
-        adapter.setHandler(usbHandler)
-        result.success(adapter.selectDevice(vendor, product))
+        if (::adapter.isInitialized) {
+            adapter.setHandler(usbHandler)
+            result.success(adapter.selectDevice(vendor, product))
+        } else result.success(false)
     }
 
-    private fun closeUSBConnection(result: MethodChannel.Result) { adapter.closeConnectionIfExists(); result.success(true) }
-    private fun printUSBText(call: MethodCall, result: MethodChannel.Result) { call.argument<String>("text")?.let { adapter.printText(it) }; result.success(true) }
-    private fun printUSBRaw(call: MethodCall, result: MethodChannel.Result) { call.argument<String>("raw")?.let { adapter.printRawData(it) }; result.success(true) }
-    private fun printUSBBytes(call: MethodCall, result: MethodChannel.Result) { call.argument<ArrayList<Int>>("bytes")?.let { adapter.printBytes(it) }; result.success(true) }
+    private fun closeUSBConnection(result: MethodChannel.Result) { if (::adapter.isInitialized) adapter.closeConnectionIfExists(); result.success(true) }
+    private fun printUSBText(call: MethodCall, result: MethodChannel.Result) { call.argument<String>("text")?.let { if (::adapter.isInitialized) adapter.printText(it) }; result.success(true) }
+    private fun printUSBRaw(call: MethodCall, result: MethodChannel.Result) { call.argument<String>("raw")?.let { if (::adapter.isInitialized) adapter.printRawData(it) }; result.success(true) }
+    private fun printUSBBytes(call: MethodCall, result: MethodChannel.Result) { call.argument<ArrayList<Int>>("bytes")?.let { if (::adapter.isInitialized) adapter.printBytes(it) }; result.success(true) }
 
+    // ====== Bluetooth verification ======
     private fun verifyBluetoothOn(): Boolean {
         if (!checkPermissions()) return false
         if (!::bluetoothService.isInitialized) bluetoothService = BluetoothService.getInstance(bluetoothHandler)
@@ -278,9 +278,15 @@ class FlutterPosPrinterPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallH
     }
 
     private fun hasPermissions(context: Context?, vararg permissions: String?): Boolean {
-        return context?.let {
-            permissions.all { ActivityCompat.checkSelfPermission(it, it!!) == PackageManager.PERMISSION_GRANTED }
-        } ?: false
+        return context?.let { permissions.all { ActivityCompat.checkSelfPermission(it, it!!) == PackageManager.PERMISSION_GRANTED } } ?: false
+    }
+
+    private fun requestUsbPermissions() {
+        val usbManager = context?.getSystemService(Context.USB_SERVICE) as? UsbManager ?: return
+        val intent = PendingIntent.getBroadcast(context, 0, Intent("com.android.example.USB_PERMISSION"), 0)
+        usbManager.deviceList.values.forEach { device ->
+            if (!usbManager.hasPermission(device)) usbManager.requestPermission(device, intent)
+        }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?): Boolean {
@@ -299,9 +305,7 @@ class FlutterPosPrinterPlatformPlugin : FlutterPlugin, MethodChannel.MethodCallH
                 if (verifyBluetoothOn() && isScan) {
                     if (isBle) bluetoothService.scanBleDevice(channel!!) else bluetoothService.scanBluDevice(channel!!)
                 }
-            } else {
-                Toast.makeText(context, R.string.not_permissions, Toast.LENGTH_LONG).show()
-            }
+            } else Toast.makeText(context, R.string.not_permissions, Toast.LENGTH_LONG).show()
             return true
         }
         return false
