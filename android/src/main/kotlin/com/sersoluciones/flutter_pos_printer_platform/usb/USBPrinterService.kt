@@ -49,7 +49,7 @@ class USBPrinterService private constructor(private var mHandler: Handler?) {
                         mHandler?.obtainMessage(STATE_USB_NONE)?.sendToTarget()
                     }
                 }
-            } else if ((UsbManager.ACTION_US B_DEVICE_DETACHED == action)) {
+            } else if ((UsbManager.ACTION_USB_DEVICE_DETACHED == action)) {
 
                 if (mUsbDevice != null) {
                     Toast.makeText(context, mContext?.getString(R.string.device_off), Toast.LENGTH_LONG).show()
@@ -67,42 +67,33 @@ class USBPrinterService private constructor(private var mHandler: Handler?) {
         }
     }
 
-    fun init(context: Context?) {
-    if (context == null) {
-        Log.e(LOG_TAG, "Context is null, cannot initialize USBPrinterService")
-        return
-    }
-
-    try {
-        mContext = context.applicationContext
-        mUSBManager = mContext?.getSystemService(Context.USB_SERVICE) as? UsbManager
-        if (mUSBManager == null) {
-            Log.e(LOG_TAG, "Failed to get USB Manager")
-            return
-        }
-
-        mPermissionIndent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    fun init(reactContext: Context?) {
+        mContext = reactContext
+        mUSBManager = mContext!!.getSystemService(Context.USB_SERVICE) as UsbManager
+        mPermissionIndent = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
             PendingIntent.getBroadcast(mContext, 0, Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE)
         } else {
             PendingIntent.getBroadcast(mContext, 0, Intent(ACTION_USB_PERMISSION), 0)
         }
-
-        // Register the USB broadcast receiver safely
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         filter.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
-
-        // Only register if not already registered
-        try {
-            mContext!!.registerReceiver(mUsbDeviceReceiver, filter)
-        } catch (e: IllegalArgumentException) {
-            Log.w(LOG_TAG, "USB Receiver already registered: ${e.message}")
-        }
-
-        Log.v(LOG_TAG, "ESC/POS Printer initialized successfully")
-    } catch (e: Exception) {
-        Log.e(LOG_TAG, "USBPrinterService initialization failed: ${e.message}", e)
+        mContext!!.registerReceiver(mUsbDeviceReceiver, filter)
+        Log.v(LOG_TAG, "ESC/POS Printer initialized")
     }
-}
+
+    fun deinit() {
+        if (mContext != null && mUsbDeviceReceiver != null) {
+            try {
+                mContext!!.unregisterReceiver(mUsbDeviceReceiver)
+            } catch (e: Exception) {
+                Log.w(LOG_TAG, "Failed to unregister receiver", e)
+            }
+        }
+        closeConnectionIfExists()
+        mContext = null
+        mUSBManager = null
+        mPermissionIndent = null
+    }
 
     fun closeConnectionIfExists() {
         if (mUsbDeviceConnection != null) {
